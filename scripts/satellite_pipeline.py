@@ -21,11 +21,11 @@ import argparse
 import json
 import logging
 import os
-import subprocess
 import tempfile
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, Optional, Tuple
+from typing import Callable, Dict, Iterable, Optional, Tuple
 
 import numpy as np
 import rasterio
@@ -49,8 +49,14 @@ class DownloadConfig:
     api_url: str = DEFAULT_API_URL
 
 
-def authenticate_from_env(prefix: str = "SENTINEL") -> DownloadConfig:
-    """Build :class:`DownloadConfig` from environment variables.
+def authenticate_from_env(
+    prefix: str = "SENTINEL",
+    *,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    api_url: Optional[str] = None,
+) -> DownloadConfig:
+    """Build :class:`DownloadConfig` from CLI arguments and environment variables.
 
     Parameters
     ----------
@@ -63,9 +69,13 @@ def authenticate_from_env(prefix: str = "SENTINEL") -> DownloadConfig:
         Credential bundle ready for use by :class:`SentinelAPI`.
     """
 
-    username = os.environ.get(f"{prefix}_USERNAME")
-    password = os.environ.get(f"{prefix}_PASSWORD")
-    api_url = os.environ.get(f"{prefix}_API_URL", DEFAULT_API_URL)
+    env_username = os.environ.get(f"{prefix}_USERNAME")
+    env_password = os.environ.get(f"{prefix}_PASSWORD")
+    env_api_url = os.environ.get(f"{prefix}_API_URL")
+
+    username = username or env_username
+    password = password or env_password
+    api_url = api_url or env_api_url or DEFAULT_API_URL
 
     if not username or not password:
         raise RuntimeError(
@@ -131,6 +141,15 @@ SENTINEL_BANDS = {
 }
 
 
+def _infer_product_name(product_path: Path, fallback: Optional[str] = None) -> str:
+    """Infer a human-friendly product name from a SAFE archive path."""
+
+    stem = product_path.stem
+    if stem.endswith(".SAFE"):
+        stem = stem[:-5]
+    return stem or fallback or product_path.name
+
+
 def _locate_band(safe_root: Path, band: str) -> Path:
     patterns = [
         f"**/IMG_DATA/*/*_{band}_*.jp2",
@@ -163,7 +182,8 @@ def extract_bands_from_safe(safe_archive: Path, destination: Path) -> Dict[str, 
         tmp_dir = tempfile.TemporaryDirectory(prefix="safe_")
         tmp_path = Path(tmp_dir.name)
         _LOGGER.info("Extracting SAFE archive %s", safe_archive)
-        subprocess.run(["unzip", "-q", str(safe_archive), "-d", str(tmp_path)], check=True)
+        with zipfile.ZipFile(safe_archive) as archive:
+            archive.extractall(tmp_path)
         safe_root = next(tmp_path.glob("*.SAFE"))
     else:
         safe_root = safe_archive
@@ -263,39 +283,83 @@ def save_raster(array: np.ndarray, template_path: Path, destination: Path) -> Pa
     return destination
 
 
-def analyse_scene(band_paths: Dict[str, Path], output_dir: Path) -> Dict[str, Path]:
+@dataclass(frozen=True)
+class IndexSpec:
+    """Metadata describing how to compute a spectral index."""
+
+    bands: Tuple[str, ...]
+    func: Callable[..., np.ndarray]
+
+
+INDEX_SPECS: Dict[str, IndexSpec] = {
+    "ndvi": IndexSpec(bands=("nir", "red"), func=compute_ndvi),
+    "ndwi": IndexSpec(bands=("nir", "swir1"), func=compute_ndwi),
+    "msi": IndexSpec(bands=("nir", "swir1"), func=compute_msi),
+}
+
+
+def analyse_scene(
+    band_paths: Dict[str, Path],
+    output_dir: Path,
+    indices: Optional[Iterable[str]] = None,
+) -> Dict[str, Path]:
     """Compute spectral indices for the scene and store them in *output_dir*."""
 
-    required = {"nir", "red", "swir1"}
-    missing = required - band_paths.keys()
-    if missing:
-        raise RuntimeError(f"Missing bands for analysis: {', '.join(sorted(missing))}")
+    requested = list(dict.fromkeys(indices)) if indices is not None else list(INDEX_SPECS.keys())
+    if not requested:
+        raise ValueError("No spectral indices requested.")
 
-    nir, transform, crs = load_raster(band_paths["nir"])
-    red, _, _ = load_raster(band_paths["red"], reference_path=band_paths["nir"])
-    swir1, _, _ = load_raster(band_paths["swir1"], reference_path=band_paths["nir"])
+    unknown = sorted(set(requested) - INDEX_SPECS.keys())
+    if unknown:
+        raise ValueError(f"Unsupported indices requested: {', '.join(unknown)}")
 
-    ndvi = compute_ndvi(nir, red)
-    ndwi = compute_ndwi(nir, swir1)
-    msi = compute_msi(nir, swir1)
+    required = set()
+    for name in requested:
+        required.update(INDEX_SPECS[name].bands)
 
-    outputs = {
-        "ndvi": save_raster(ndvi, band_paths["nir"], output_dir / "ndvi.tif"),
-        "ndwi": save_raster(ndwi, band_paths["nir"], output_dir / "ndwi.tif"),
-        "msi": save_raster(msi, band_paths["nir"], output_dir / "msi.tif"),
-    }
+    missing_bands = required - band_paths.keys()
+    if missing_bands:
+        raise RuntimeError(f"Missing bands for analysis: {', '.join(sorted(missing_bands))}")
+
+    nir_data, transform, crs = load_raster(band_paths["nir"])
+    band_arrays: Dict[str, np.ndarray] = {"nir": nir_data}
+
+    for band in required - {"nir"}:
+        data, _, _ = load_raster(band_paths[band], reference_path=band_paths["nir"])
+        band_arrays[band] = data
+
+    outputs: Dict[str, Path] = {}
+    for name in requested:
+        spec = INDEX_SPECS[name]
+        arrays = [band_arrays[band] for band in spec.bands]
+        result = spec.func(*arrays)
+        outputs[name] = save_raster(result, band_paths["nir"], output_dir / f"{name}.tif")
     return outputs
 
 
 def _parse_arguments(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--geojson", type=Path, required=True, help="Path to AOI GeoJSON polygon")
-    parser.add_argument("--start-date", required=True, help="Start date YYYY-MM-DD")
-    parser.add_argument("--end-date", required=True, help="End date YYYY-MM-DD")
+    parser.add_argument("--geojson", type=Path, help="Path to AOI GeoJSON polygon (required when downloading)")
+    parser.add_argument("--start-date", help="Start date YYYY-MM-DD (required when downloading)")
+    parser.add_argument("--end-date", help="End date YYYY-MM-DD (required when downloading)")
     parser.add_argument("--cloud", type=int, nargs=2, default=(0, 20), help="Acceptable cloud cover percentage range")
     parser.add_argument("--download-dir", type=Path, default=Path("data/raw"), help="Directory to store downloaded products")
     parser.add_argument("--workdir", type=Path, default=Path("data/processed"), help="Directory for processed outputs")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    parser.add_argument("--username", help="Sentinel API username (overrides SENTINEL_USERNAME env var)")
+    parser.add_argument("--password", help="Sentinel API password (overrides SENTINEL_PASSWORD env var)")
+    parser.add_argument("--api-url", help=f"Sentinel API URL (defaults to {DEFAULT_API_URL})")
+    parser.add_argument(
+        "--safe-path",
+        type=Path,
+        help="Existing SAFE archive (.zip) or directory to analyse instead of downloading a new product",
+    )
+    parser.add_argument(
+        "--indices",
+        nargs="+",
+        choices=sorted(INDEX_SPECS.keys()),
+        help="Subset of spectral indices to compute (default: all available)",
+    )
     return parser.parse_args(argv)
 
 
@@ -303,23 +367,43 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     args = _parse_arguments(argv)
     logging.basicConfig(level=args.log_level)
 
-    config = authenticate_from_env()
-    area = AreaOfInterest.from_geojson(args.geojson)
+    selected_indices = list(dict.fromkeys(args.indices or list(INDEX_SPECS.keys())))
 
-    api = SentinelAPI(config.username, config.password, config.api_url)
-    product = query_latest_product(api, area, args.start_date, args.end_date, tuple(args.cloud))
-    if not product:
-        _LOGGER.error("No Sentinel-2 product found for the provided parameters.")
-        return
+    if args.safe_path:
+        product_path = args.safe_path.expanduser().resolve()
+        if not product_path.exists():
+            _LOGGER.error("Provided SAFE path does not exist: %s", product_path)
+            return
+        product_title = _infer_product_name(product_path)
+        _LOGGER.info("Using existing SAFE product at %s", product_path)
+    else:
+        missing_args = [name for name, value in (("geojson", args.geojson), ("start-date", args.start_date), ("end-date", args.end_date)) if value is None]
+        if missing_args:
+            _LOGGER.error(
+                "Missing required arguments for download: %s",
+                ", ".join(missing_args),
+            )
+            return
+        config = authenticate_from_env(username=args.username, password=args.password, api_url=args.api_url)
+        assert args.geojson is not None
+        geojson_path = args.geojson.expanduser().resolve()
+        area = AreaOfInterest.from_geojson(geojson_path)
 
-    _LOGGER.info("Downloading product %s", product["title"])
-    product_path = download_product(api, product, args.download_dir)
+        api = SentinelAPI(config.username, config.password, config.api_url)
+        product = query_latest_product(api, area, args.start_date, args.end_date, tuple(args.cloud))  # type: ignore[arg-type]
+        if not product:
+            _LOGGER.error("No Sentinel-2 product found for the provided parameters.")
+            return
+
+        _LOGGER.info("Downloading product %s", product["title"])
+        product_path = download_product(api, product, args.download_dir)
+        product_title = product.get("title") or _infer_product_name(product_path)
 
     _LOGGER.info("Extracting spectral bands")
-    bands = extract_bands_from_safe(product_path, args.workdir / product["title"])  # type: ignore[arg-type]
+    bands = extract_bands_from_safe(product_path, args.workdir / product_title)  # type: ignore[arg-type]
 
-    _LOGGER.info("Computing spectral indices")
-    outputs = analyse_scene(bands, args.workdir / product["title"] / "indices")
+    _LOGGER.info("Computing spectral indices: %s", ", ".join(selected_indices))
+    outputs = analyse_scene(bands, args.workdir / product_title / "indices", indices=selected_indices)
 
     for name, path in outputs.items():
         _LOGGER.info("Generated %s at %s", name.upper(), path)
