@@ -1,17 +1,20 @@
 # Contexto do Projeto
 
 ## O que foi entregue
-- Script `scripts/satellite_pipeline.py` atualizado para aceitar credenciais via CLI, reutilizar produtos SAFE locais e selecionar dinamicamente os indices espectrais disponiveis.
-- Registro padronizado de indices (NDVI, NDWI, MSI) com requisitos de bandas e reaproveitamento de dados reprojetados.
-- README com instrucoes de setup, autenticacao, exemplos de uso on-line/off-line e solucao de problemas.
+- Script `scripts/satellite_pipeline.py` atualizado para consumir o catalogo OData do Copernicus Data Space, autenticar via OAuth2 (senha + client id), reutilizar produtos SAFE locais e selecionar dinamicamente os indices espectrais disponiveis.
+- Extração padronizada das bandas visíveis, red-edge, NIR e SWIR e cálculo automático de índices (NDVI, NDWI, MSI, EVI, NDRE, NDMI) reaproveitando reprojeções em disco.
+- Scripts `scripts/render_index_map.py` e `scripts/render_truecolor_map.py` para gerar mapas HTML (offline/online) com nitidez ajustável e camada de fundo Esri World Imagery opcional.
+- README detalhando setup, autenticação, execução do pipeline, visualização (NDVI, EVI, NDRE, NDMI, true color) e solução de problemas.
 
 ## Fluxo atual
 1. Opcionalmente reutiliza um SAFE existente (`--safe-path`) ou baixa o produto mais recente com base em poligono, intervalo de datas e cobertura de nuvens.
-2. Extrai bandas relevantes para o monitoramento da murcha (B04, B08, B11, B12) e as salva como GeoTIFF.
-3. Calcula os indices solicitados (`--indices`) e grava os resultados em `<workdir>/<produto>/indices/<indice>.tif`.
+2. Extrai bandas relevantes (visível, red-edge, NIR, SWIR) e as salva como GeoTIFF reutilizáveis.
+3. Calcula os índices solicitados (`--indices`) e grava os resultados em `<workdir>/<produto>/indices/<indice>.tif` (NDVI, NDWI, MSI, EVI, NDRE, NDMI).
+4. Gera mapas HTML interativos (NDVI, EVI, NDRE, NDMI, true color) com nitidez ajustável; quando online, oferece a camada Esri World Imagery como fundo.
 
 ## Pendencias e proximos passos
-- Validar o pipeline end-to-end com credenciais reais e um poligono de teste, confirmando a geracao correta dos arquivos.
-- Revisar se ha indices adicionais de interesse (ex.: NDRE, SIPI) e adiciona-los ao dicionario `INDEX_SPECS`.
+- Estender o conjunto de indicadores (ex.: SIPI, NDVIre, MCARI2) e estatisticas temporais para diagnósticos precoces.
 - Criar um fluxo automatizado (cron/notebook) para baixar novos produtos periodicamente e comparar a evolucao temporal dos indices.
 - Incorporar analises agronomicas adicionais (relatorios graficos ou alertas) usando os rasters gerados como entrada.
+- Definir estrategia de armazenamento para os SAFE baixados (limpeza periodica ou upload para bucket dedicado).
+- Integrar sensores complementares (Landsat/ECOSTRESS, SMAP/CHIRPS, Sentinel-1) e basemaps de maior resolucao quando houver conectividade, mantendo claro o limite de 10 m do Sentinel-2.

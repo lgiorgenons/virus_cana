@@ -1,3 +1,6 @@
 numpy
 rasterio
 sentinelsat
+folium
+matplotlib
+scipy
