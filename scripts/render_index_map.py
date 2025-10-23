@@ -13,11 +13,14 @@ from typing import Iterable, Optional, Sequence, Tuple, Dict, Any
 import folium
 import numpy as np
 import rasterio
+from affine import Affine
 from branca.colormap import LinearColormap
 from matplotlib import colormaps, colors
 from rasterio.enums import Resampling
+from rasterio.features import rasterize
 from rasterio.transform import array_bounds
-from rasterio.warp import calculate_default_transform, reproject
+from rasterio.warp import calculate_default_transform, reproject, transform_bounds
+from rasterio.windows import from_bounds
 from scipy.ndimage import gaussian_filter
 
 
@@ -25,20 +28,33 @@ DEFAULT_CMAP = "RdYlGn"
 TARGET_CRS = "EPSG:4326"
 
 
-def _load_raster(path: Path) -> Tuple[np.ndarray, rasterio.Affine, Sequence[float]]:
+def _load_raster(path: Path, clip_bounds_wgs84: Optional[Tuple[float, float, float, float]] = None) -> Tuple[np.ndarray, rasterio.Affine, Sequence[float]]:
     """Load a raster and reproject it to WGS84 (EPSG:4326)."""
 
     with rasterio.open(path) as src:
-        data = src.read(1).astype(np.float32)
+        if clip_bounds_wgs84 is not None:
+            left, bottom, right, top = transform_bounds(TARGET_CRS, src.crs, *clip_bounds_wgs84, densify_pts=21)
+            left = max(left, src.bounds.left)
+            bottom = max(bottom, src.bounds.bottom)
+            right = min(right, src.bounds.right)
+            top = min(top, src.bounds.top)
+            window = from_bounds(left, bottom, right, top, transform=src.transform).round_offsets().round_lengths()
+            data = src.read(1, window=window).astype(np.float32)
+            src_transform = src.window_transform(window)
+            src_bounds = (left, bottom, right, top)
+        else:
+            data = src.read(1).astype(np.float32)
+            src_transform = src.transform
+            src_bounds = src.bounds
+
         nodata = src.nodata
         if nodata is not None:
             data = np.where(data == nodata, np.nan, data)
         elif np.ma.isMaskedArray(data):
             data = data.filled(np.nan)
-        src_bounds = src.bounds
-        src_transform = src.transform
+
         dst_transform, width, height = calculate_default_transform(
-            src.crs, TARGET_CRS, src.width, src.height, *src_bounds
+            src.crs, TARGET_CRS, data.shape[1], data.shape[0], *src_bounds
         )
 
         destination = np.full((height, width), np.nan, dtype=np.float32)
@@ -90,6 +106,20 @@ def _load_geojson(geojson_path: Path) -> Dict[str, Any]:
         return json.load(file)
 
 
+def _iterate_geometries(geometry: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
+    gtype = geometry.get("type")
+    if gtype == "FeatureCollection":
+        for feature in geometry.get("features", []):
+            yield from _iterate_geometries(feature)
+    elif gtype == "Feature":
+        yield from _iterate_geometries(geometry["geometry"])
+    elif gtype == "Polygon":
+        yield geometry
+    elif gtype == "MultiPolygon":
+        for polygon in geometry.get("coordinates", []):
+            yield {"type": "Polygon", "coordinates": polygon}
+
+
 def _add_geojson_layer(map_obj: folium.Map, geojson_data: Dict[str, Any]) -> None:
     folium.GeoJson(data=geojson_data, name="Area de interesse", style_function=lambda _: {"fillOpacity": 0}).add_to(map_obj)
 
@@ -136,6 +166,46 @@ def _apply_unsharp_mask(data: np.ndarray, radius: float, amount: float) -> np.nd
     return np.where(mask, sharpened, np.nan)
 
 
+def _apply_smoothing(data: np.ndarray, radius: float) -> np.ndarray:
+    if radius <= 0:
+        return data
+    mask = np.isfinite(data)
+    if not np.any(mask):
+        return data
+    fill_value = float(np.nanmean(data[mask])) if mask.any() else 0.0
+    filled = np.where(mask, data, fill_value)
+    smoothed = gaussian_filter(filled, sigma=radius, mode="nearest")
+    return np.where(mask, smoothed, np.nan)
+
+
+def _upsample_raster(
+    data: np.ndarray,
+    transform: rasterio.Affine,
+    scale_factor: float,
+    nodata: float = np.nan,
+) -> Tuple[np.ndarray, rasterio.Affine]:
+    if scale_factor <= 1.0:
+        return data, transform
+
+    new_height = int(data.shape[0] * scale_factor)
+    new_width = int(data.shape[1] * scale_factor)
+    new_transform = transform * Affine.scale(1 / scale_factor, 1 / scale_factor)
+
+    destination = np.full((new_height, new_width), np.nan, dtype=np.float32)
+    reproject(
+        source=data,
+        destination=destination,
+        src_transform=transform,
+        src_crs=TARGET_CRS,
+        dst_transform=new_transform,
+        dst_crs=TARGET_CRS,
+        src_nodata=nodata,
+        dst_nodata=np.nan,
+        resampling=Resampling.bilinear,
+    )
+    return destination, new_transform
+
+
 def build_map(
     index_path: Path,
     output_path: Path,
@@ -147,27 +217,20 @@ def build_map(
     tiles: str = "CartoDB positron",
     tile_attr: Optional[str] = None,
     padding_factor: float = 0.3,
+    upsample: float = 1.0,
     sharpen: bool = False,
     sharpen_radius: float = 1.0,
     sharpen_amount: float = 1.2,
+    smooth_radius: float = 0.0,
 ) -> Path:
 
     overlay_geojsons = []
+    clip_bounds = None
     if overlays:
         for geojson_path in overlays:
             overlay_geojsons.append(_load_geojson(geojson_path))
 
-    data, transform, bounds = _load_raster(index_path)
-    if sharpen:
-        data = _apply_unsharp_mask(data, radius=sharpen_radius, amount=sharpen_amount)
-    image, min_value, max_value = _generate_rgba(data, cmap_name, vmin, vmax, opacity)
-
-    min_lon, min_lat, max_lon, max_lat = bounds
-
-    if overlay_geojsons:
-        geom_bounds = [
-            _extract_geometry_bounds(geojson_data) for geojson_data in overlay_geojsons
-        ]
+        geom_bounds = [_extract_geometry_bounds(geojson_data) for geojson_data in overlay_geojsons]
         geom_bounds = [b for b in geom_bounds if b is not None]
         if geom_bounds:
             min_lon_geo = min(b[0] for b in geom_bounds)
@@ -178,10 +241,58 @@ def build_map(
             height = max_lat_geo - min_lat_geo
             pad_lon = width * padding_factor / 2
             pad_lat = height * padding_factor / 2
-            min_lon = min_lon_geo - pad_lon
-            max_lon = max_lon_geo + pad_lon
-            min_lat = min_lat_geo - pad_lat
-            max_lat = max_lat_geo + pad_lat
+            clip_bounds = (
+                min_lon_geo - pad_lon,
+                min_lat_geo - pad_lat,
+                max_lon_geo + pad_lon,
+                max_lat_geo + pad_lat,
+            )
+
+    data, transform, bounds = _load_raster(index_path, clip_bounds_wgs84=clip_bounds)
+    if sharpen:
+        data = _apply_unsharp_mask(data, radius=sharpen_radius, amount=sharpen_amount)
+
+    if overlay_geojsons:
+        shapes = []
+        for geojson_data in overlay_geojsons:
+            for geom in _iterate_geometries(geojson_data):
+                shapes.append((geom, 1))
+        if shapes:
+            mask = rasterize(
+                shapes=shapes,
+                out_shape=data.shape,
+                transform=transform,
+                fill=0,
+                all_touched=False,
+                dtype=np.uint8,
+            )
+            data = np.where(mask == 1, data, np.nan)
+
+    data, transform = _upsample_raster(data, transform, upsample)
+    data = _apply_smoothing(data, smooth_radius)
+
+    if overlay_geojsons and upsample > 1.0:
+        shapes = []
+        for geojson_data in overlay_geojsons:
+            for geom in _iterate_geometries(geojson_data):
+                shapes.append((geom, 1))
+        if shapes:
+            mask = rasterize(
+                shapes=shapes,
+                out_shape=data.shape,
+                transform=transform,
+                fill=0,
+                all_touched=False,
+                dtype=np.uint8,
+            )
+            data = np.where(mask == 1, data, np.nan)
+
+    image, min_value, max_value = _generate_rgba(data, cmap_name, vmin, vmax, opacity)
+
+    min_lon, min_lat, max_lon, max_lat = bounds
+
+    if clip_bounds is not None:
+        min_lon, min_lat, max_lon, max_lat = clip_bounds
 
     centre_lat = (min_lat + max_lat) / 2
     centre_lon = (min_lon + max_lon) / 2
@@ -249,6 +360,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--sharpen", action="store_true", help="Aplica filtro de nitidez (unsharp mask).")
     parser.add_argument("--sharpen-radius", type=float, default=1.0, help="Raio (sigma) usado na gaussiana do filtro.")
     parser.add_argument("--sharpen-amount", type=float, default=1.3, help="Intensidade do realce de nitidez.")
+    parser.add_argument("--upsample", type=float, default=1.0, help="Fator de upsample para suavizar pixels (ex.: 4).")
+    parser.add_argument("--smooth-radius", type=float, default=0.0, help="Aplica suavizacao gaussiana apos o upsample.")
     return parser.parse_args(argv)
 
 
@@ -265,9 +378,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         tiles=args.tiles,
         tile_attr=args.tile_attr,
         padding_factor=args.padding,
+        upsample=args.upsample,
         sharpen=args.sharpen,
         sharpen_radius=args.sharpen_radius,
         sharpen_amount=args.sharpen_amount,
+        smooth_radius=args.smooth_radius,
     )
     print(f"Mapa salvo em {output}")
 

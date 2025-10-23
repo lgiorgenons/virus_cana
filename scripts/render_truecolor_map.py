@@ -18,7 +18,8 @@ from branca.colormap import LinearColormap
 from matplotlib import colormaps
 from rasterio.enums import Resampling
 from rasterio.transform import array_bounds
-from rasterio.warp import calculate_default_transform, reproject
+from rasterio.warp import calculate_default_transform, reproject, transform_bounds
+from rasterio.windows import from_bounds
 from scipy.ndimage import gaussian_filter
 
 TARGET_CRS = "EPSG:4326"
@@ -26,30 +27,47 @@ TARGET_CRS = "EPSG:4326"
 
 def _reproject_to_wgs84(
     band_path: Path,
+    clip_bounds_wgs84: Optional[Tuple[float, float, float, float]] = None,
     dst_transform: Optional[rasterio.Affine] = None,
     dst_width: Optional[int] = None,
     dst_height: Optional[int] = None,
-) -> Tuple[np.ndarray, rasterio.Affine]:
+) -> Tuple[np.ndarray, rasterio.Affine, Tuple[float, float, float, float]]:
     """Reprojeta uma banda para WGS84 utilizando os parametros de destino, se fornecidos."""
 
     with rasterio.open(band_path) as src:
+        if clip_bounds_wgs84 is not None:
+            left, bottom, right, top = transform_bounds(TARGET_CRS, src.crs, *clip_bounds_wgs84, densify_pts=21)
+            left = max(left, src.bounds.left)
+            bottom = max(bottom, src.bounds.bottom)
+            right = min(right, src.bounds.right)
+            top = min(top, src.bounds.top)
+            window = from_bounds(left, bottom, right, top, transform=src.transform).round_offsets().round_lengths()
+            data = src.read(1, window=window).astype(np.float32)
+            src_transform = src.window_transform(window)
+            src_bounds = (left, bottom, right, top)
+        else:
+            data = src.read(1).astype(np.float32)
+            src_transform = src.transform
+            src_bounds = src.bounds
+
         if dst_transform is None or dst_width is None or dst_height is None:
             dst_transform, dst_width, dst_height = calculate_default_transform(
-                src.crs, TARGET_CRS, src.width, src.height, *src.bounds
+                src.crs, TARGET_CRS, data.shape[1], data.shape[0], *src_bounds
             )
 
         destination = np.empty((dst_height, dst_width), dtype=np.float32)
         reproject(
-            source=rasterio.band(src, 1),
+            source=data,
             destination=destination,
-            src_transform=src.transform,
+            src_transform=src_transform,
             src_crs=src.crs,
             dst_transform=dst_transform,
             dst_crs=TARGET_CRS,
             resampling=Resampling.bilinear,
         )
 
-    return destination, dst_transform
+    bounds = array_bounds(destination.shape[0], destination.shape[1], dst_transform)
+    return destination, dst_transform, bounds
 
 
 def _extract_geometry_bounds(geojson_data: Dict[str, Any]) -> Optional[Tuple[float, float, float, float]]:
@@ -132,22 +150,10 @@ def build_truecolor_map(
     sharpen_radius: float = 1.0,
     sharpen_amount: float = 1.2,
 ) -> Path:
-    red_array, transform = _reproject_to_wgs84(red_path)
-    height, width = red_array.shape
-    green_array, _ = _reproject_to_wgs84(green_path, transform, width, height)
-    blue_array, _ = _reproject_to_wgs84(blue_path, transform, width, height)
-
-    if sharpen:
-        red_array = _apply_unsharp_mask(red_array, sharpen_radius, sharpen_amount)
-        green_array = _apply_unsharp_mask(green_array, sharpen_radius, sharpen_amount)
-        blue_array = _apply_unsharp_mask(blue_array, sharpen_radius, sharpen_amount)
-
-    bounds = array_bounds(height, width, transform)
-    min_lon, min_lat, max_lon, max_lat = bounds
-
-    geojson_data = [_load_geojson(path) for path in overlays] if overlays else []
-    if geojson_data:
-        geom_bounds = [_extract_geometry_bounds(data) for data in geojson_data]
+    overlays_data = [_load_geojson(path) for path in overlays] if overlays else []
+    clip_bounds = None
+    if overlays_data:
+        geom_bounds = [_extract_geometry_bounds(data) for data in overlays_data]
         geom_bounds = [b for b in geom_bounds if b is not None]
         if geom_bounds:
             min_lon_geo = min(b[0] for b in geom_bounds)
@@ -158,10 +164,27 @@ def build_truecolor_map(
             height_geo = max_lat_geo - min_lat_geo
             pad_lon = width_geo * padding_factor / 2
             pad_lat = height_geo * padding_factor / 2
-            min_lon = min_lon_geo - pad_lon
-            max_lon = max_lon_geo + pad_lon
-            min_lat = min_lat_geo - pad_lat
-            max_lat = max_lat_geo + pad_lat
+            clip_bounds = (
+                min_lon_geo - pad_lon,
+                min_lat_geo - pad_lat,
+                max_lon_geo + pad_lon,
+                max_lat_geo + pad_lat,
+            )
+
+    red_array, transform, bounds = _reproject_to_wgs84(red_path, clip_bounds_wgs84=clip_bounds)
+    height, width = red_array.shape
+    green_array, _, _ = _reproject_to_wgs84(green_path, clip_bounds_wgs84=clip_bounds, dst_transform=transform, dst_width=width, dst_height=height)
+    blue_array, _, _ = _reproject_to_wgs84(blue_path, clip_bounds_wgs84=clip_bounds, dst_transform=transform, dst_width=width, dst_height=height)
+
+    if sharpen:
+        red_array = _apply_unsharp_mask(red_array, sharpen_radius, sharpen_amount)
+        green_array = _apply_unsharp_mask(green_array, sharpen_radius, sharpen_amount)
+        blue_array = _apply_unsharp_mask(blue_array, sharpen_radius, sharpen_amount)
+
+    min_lon, min_lat, max_lon, max_lat = bounds
+
+    if clip_bounds is not None:
+        min_lon, min_lat, max_lon, max_lat = clip_bounds
 
     centre_lat = (min_lat + max_lat) / 2
     centre_lon = (min_lon + max_lon) / 2
@@ -186,8 +209,8 @@ def build_truecolor_map(
         name="True color",
     ).add_to(base_map)
 
-    if geojson_data:
-        for data in geojson_data:
+    if overlays_data:
+        for data in overlays_data:
             folium.GeoJson(data=data, name="Area de interesse", style_function=lambda _: {"fillOpacity": 0}).add_to(base_map)
 
     # Opcional: legenda dummy para reforcar que se trata de composicao RGB

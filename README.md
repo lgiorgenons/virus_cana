@@ -66,7 +66,7 @@ Parametros importantes:
 python scripts/satellite_pipeline.py \
   --safe-path data/raw/S2A_MSIL2A_*.SAFE.zip \
   --workdir data/processed \
-  --indices ndvi ndwi evi ndre ndmi
+  --indices ndvi ndwi msi evi ndre ndmi ndre1 ndre2 ndre3 ndre4 ci_rededge sipi
 ```
 
 ## Saidas
@@ -84,6 +84,9 @@ Os nomes dos indices:
 - `evi`: vigor em dosses densos com correção atmosférica.
 - `ndre`: sensível à clorofila (banda red-edge).
 - `ndmi`: umidade da vegetação usando NIR e SWIR.
+- `ndre1`/`ndre2`/`ndre3`/`ndre4`: variantes NDRE usando cada banda red-edge (B05-B08A) para detectar clorofila em diferentes profundidades do dossel.
+- `ci_rededge`: índice de clorofila baseado na razão `nir/rededge4 - 1`.
+- `sipi`: Structure Insensitive Pigment Index, bom para avaliar relações clorofila/carotenoides.
 
 ### Visualizacao rapida dos indices
 Gere um mapa interativo (HTML) sobrepondo um indice ao mapa de fundo:
@@ -92,6 +95,7 @@ Gere um mapa interativo (HTML) sobrepondo um indice ao mapa de fundo:
 python scripts/render_index_map.py \
   --index data/processed/<produto>/indices/ndvi.tif \
   --geojson dados/map.geojson \
+  --upsample 12 --smooth-radius 1 \
   --sharpen --sharpen-radius 1.2 --sharpen-amount 1.5 \
   --output mapas/ndvi.html
 ```
@@ -101,6 +105,7 @@ Substitua `ndvi.tif` por `evi.tif`, `ndre.tif` ou `ndmi.tif` para visualizar os 
 A visualizacao usa, por padrao, o mapa `CartoDB positron` (necessita internet). Em ambiente offline execute com `--tiles none` para carregar apenas o raster.
 
 A pagina resultante pode ser aberta diretamente no navegador. Ajuste `--colormap`, `--vmin`, `--vmax` e os parametros de nitidez (`--sharpen-radius`, `--sharpen-amount`) conforme necessario.
+Use `--upsample` (ex.: 10-12) e `--smooth-radius` para suavizar pixels e aproximar a escala visual do basemap.
 
 Para uma composicao RGB (true color) com nitidez maxima:
 
@@ -125,7 +130,7 @@ data/
 - raw/           # Produtos SAFE baixados
 - processed/     # Bandas extraidas e indices calculados
 
-As bandas salvas incluem `blue`, `green`, `red`, `rededge1-4`, `nir`, `swir1` e `swir2`, permitindo calcular indices baseados nas bandas red-edge do Sentinel-2.
+As bandas salvas incluem `coastal`, `blue`, `green`, `red`, `rededge1-4`, `nir`, `water_vapor`, `cirrus`, `swir1` e `swir2`, permitindo calcular indices baseados nas bandas red-edge e SWIR do Sentinel-2.
 ```
 
 ## Solucao de problemas

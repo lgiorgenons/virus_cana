@@ -304,6 +304,7 @@ def create_dataspace_session(config: DownloadConfig) -> requests.Session:
 
 
 SENTINEL_BANDS = {
+    "B01": "coastal",
     "B02": "blue",
     "B03": "green",
     "B04": "red",
@@ -312,6 +313,8 @@ SENTINEL_BANDS = {
     "B07": "rededge3",
     "B08": "nir",
     "B8A": "rededge4",
+    "B09": "water_vapor",
+    "B10": "cirrus",
     "B11": "swir1",
     "B12": "swir2",
 }
@@ -466,6 +469,29 @@ def compute_ndmi(nir: np.ndarray, swir: np.ndarray) -> np.ndarray:
     return _compute_index(nir - swir, nir + swir)
 
 
+def compute_ndre_generic(nir: np.ndarray, rededge: np.ndarray) -> np.ndarray:
+    """Generic NDRE using a given red-edge band."""
+
+    return _compute_index(nir - rededge, nir + rededge)
+
+
+def compute_ci_rededge(nir: np.ndarray, rededge: np.ndarray) -> np.ndarray:
+    """Chlorophyll Index using red-edge band."""
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ci = nir / np.where(rededge == 0, np.nan, rededge) - 1
+    ci = np.where(np.isnan(ci), 0, ci)
+    return ci
+
+
+def compute_sipi(nir: np.ndarray, red: np.ndarray, blue: np.ndarray) -> np.ndarray:
+    """Structure Insensitive Pigment Index."""
+
+    numerator = nir - red
+    denominator = nir - blue
+    return _compute_index(numerator, denominator)
+
+
 def save_raster(array: np.ndarray, template_path: Path, destination: Path) -> Path:
     """Persist an index using the metadata from *template_path*."""
 
@@ -493,6 +519,12 @@ INDEX_SPECS: Dict[str, IndexSpec] = {
     "evi": IndexSpec(bands=("nir", "red", "blue"), func=compute_evi),
     "ndre": IndexSpec(bands=("nir", "rededge4"), func=compute_ndre),
     "ndmi": IndexSpec(bands=("nir", "swir1"), func=compute_ndmi),
+    "ndre1": IndexSpec(bands=("nir", "rededge1"), func=compute_ndre_generic),
+    "ndre2": IndexSpec(bands=("nir", "rededge2"), func=compute_ndre_generic),
+    "ndre3": IndexSpec(bands=("nir", "rededge3"), func=compute_ndre_generic),
+    "ndre4": IndexSpec(bands=("nir", "rededge4"), func=compute_ndre_generic),
+    "ci_rededge": IndexSpec(bands=("nir", "rededge4"), func=compute_ci_rededge),
+    "sipi": IndexSpec(bands=("nir", "red", "blue"), func=compute_sipi),
 }
 
 
