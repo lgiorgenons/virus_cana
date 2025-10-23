@@ -1,6 +1,9 @@
 numpy
 rasterio
 sentinelsat
+<<<<<<< ours
 folium
 matplotlib
 scipy
+=======
+>>>>>>> theirs

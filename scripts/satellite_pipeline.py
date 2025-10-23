@@ -2,7 +2,11 @@
 
 This module provides a small command line utility to:
 
+<<<<<<< ours
 * query and download Sentinel-2 Level-2A products using the Copernicus Data Space OData API;
+=======
+* query and download Sentinel-2 Level-2A products using the Copernicus Open Access Hub;
+>>>>>>> theirs
 * extract the necessary spectral bands; and
 * compute vegetation/water stress indicators such as NDVI, NDWI and MSI.
 
@@ -11,9 +15,15 @@ file "Análise Detalhada e Abrangente da Síndrome da Murcha da Cana-de-Açúcar
 
 The implementation favours composable functions so that the script can be
 orchestrated from notebooks or larger data pipelines. For the sake of simplicity
+<<<<<<< ours
 we only download the first product that matches the query criteria. HTTP
 requests are issued directly against the OData REST endpoint, while ``rasterio``
 and ``numpy`` perform raster handling and analytics.
+=======
+we only download the first product that matches the query criteria. The
+``sentinelsat`` package is used for the download while ``rasterio`` and ``numpy``
+perform raster handling and analytics.
+>>>>>>> theirs
 """
 from __future__ import annotations
 
@@ -21,6 +31,7 @@ import argparse
 import json
 import logging
 import os
+<<<<<<< ours
 import tempfile
 import zipfile
 from dataclasses import dataclass
@@ -28,21 +39,36 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Dict, Iterable, Optional, Tuple
 from urllib.parse import urljoin
+=======
+import subprocess
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, Iterable, Optional, Tuple
+>>>>>>> theirs
 
 import numpy as np
 import rasterio
 from rasterio.enums import Resampling
 from rasterio.warp import reproject
+<<<<<<< ours
 import requests
+=======
+from sentinelsat import SentinelAPI, geojson_to_wkt
+>>>>>>> theirs
 
 
 _LOGGER = logging.getLogger(__name__)
 
 
+<<<<<<< ours
 DEFAULT_API_URL = "https://catalogue.dataspace.copernicus.eu/odata/v1/"
 DEFAULT_TOKEN_URL = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
 DEFAULT_CLIENT_ID = "cdse-public"
 _REQUEST_TIMEOUT = 60
+=======
+DEFAULT_API_URL = "https://apihub.copernicus.eu/apihub"
+>>>>>>> theirs
 
 
 @dataclass
@@ -52,6 +78,7 @@ class DownloadConfig:
     username: str
     password: str
     api_url: str = DEFAULT_API_URL
+<<<<<<< ours
     token_url: str = DEFAULT_TOKEN_URL
     client_id: str = DEFAULT_CLIENT_ID
 
@@ -66,6 +93,12 @@ def authenticate_from_env(
     client_id: Optional[str] = None,
 ) -> DownloadConfig:
     """Build :class:`DownloadConfig` from CLI arguments and environment variables.
+=======
+
+
+def authenticate_from_env(prefix: str = "SENTINEL") -> DownloadConfig:
+    """Build :class:`DownloadConfig` from environment variables.
+>>>>>>> theirs
 
     Parameters
     ----------
@@ -75,6 +108,7 @@ def authenticate_from_env(
     Returns
     -------
     DownloadConfig
+<<<<<<< ours
         Credential bundle ready for Copernicus Data Space requests.
     """
 
@@ -103,6 +137,22 @@ def authenticate_from_env(
         token_url=token_url,
         client_id=client_id,
     )
+=======
+        Credential bundle ready for use by :class:`SentinelAPI`.
+    """
+
+    username = os.environ.get(f"{prefix}_USERNAME")
+    password = os.environ.get(f"{prefix}_PASSWORD")
+    api_url = os.environ.get(f"{prefix}_API_URL", DEFAULT_API_URL)
+
+    if not username or not password:
+        raise RuntimeError(
+            "Missing Sentinel Hub credentials. Set the "
+            f"{prefix}_USERNAME and {prefix}_PASSWORD environment variables."
+        )
+
+    return DownloadConfig(username=username, password=password, api_url=api_url)
+>>>>>>> theirs
 
 
 @dataclass
@@ -117,6 +167,7 @@ class AreaOfInterest:
             geometry = json.load(file)
         return cls(geometry=geometry)
 
+<<<<<<< ours
     def to_wkt(self) -> str:
         """Convert the stored geometry into a WKT representation."""
 
@@ -182,6 +233,11 @@ def _normalise_date(value: str) -> str:
 def query_latest_product(
     session: requests.Session,
     config: DownloadConfig,
+=======
+
+def query_latest_product(
+    api: SentinelAPI,
+>>>>>>> theirs
     area: AreaOfInterest,
     start_date: str,
     end_date: str,
@@ -189,6 +245,7 @@ def query_latest_product(
 ) -> Optional[Dict]:
     """Query the latest Sentinel-2 product matching the constraints."""
 
+<<<<<<< ours
     footprint_wkt = area.to_wkt()
     start_iso = _normalise_date(start_date)
     end_iso = _normalise_date(end_date)
@@ -301,22 +358,50 @@ def create_dataspace_session(config: DownloadConfig) -> requests.Session:
     session = requests.Session()
     session.headers.update({"Authorization": f"Bearer {token}"})
     return session
+=======
+    footprint = geojson_to_wkt(area.geometry)
+    products = api.query(
+        footprint,
+        date=(start_date, end_date),
+        platformname="Sentinel-2",
+        producttype="S2MSI2A",
+        cloudcoverpercentage=cloud_cover,
+    )
+    if not products:
+        return None
+
+    # Sentinel API returns a dict keyed by UUID. We select the most recent scene.
+    return products[next(iter(sorted(products, key=lambda k: products[k]["ingestiondate"], reverse=True)))]
+
+
+def download_product(api: SentinelAPI, product: Dict, target_dir: Path) -> Path:
+    """Download the provided product into *target_dir* and return the path."""
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    product_path = api.download(product["uuid"], directory_path=str(target_dir))
+    return Path(product_path["path"])
+>>>>>>> theirs
 
 
 SENTINEL_BANDS = {
     "B02": "blue",
     "B03": "green",
     "B04": "red",
+<<<<<<< ours
     "B05": "rededge1",
     "B06": "rededge2",
     "B07": "rededge3",
     "B08": "nir",
     "B8A": "rededge4",
+=======
+    "B08": "nir",
+>>>>>>> theirs
     "B11": "swir1",
     "B12": "swir2",
 }
 
 
+<<<<<<< ours
 def _infer_product_name(product_path: Path, fallback: Optional[str] = None) -> str:
     """Infer a human-friendly product name from a SAFE archive path."""
 
@@ -326,6 +411,8 @@ def _infer_product_name(product_path: Path, fallback: Optional[str] = None) -> s
     return stem or fallback or product_path.name
 
 
+=======
+>>>>>>> theirs
 def _locate_band(safe_root: Path, band: str) -> Path:
     patterns = [
         f"**/IMG_DATA/*/*_{band}_*.jp2",
@@ -358,8 +445,12 @@ def extract_bands_from_safe(safe_archive: Path, destination: Path) -> Dict[str, 
         tmp_dir = tempfile.TemporaryDirectory(prefix="safe_")
         tmp_path = Path(tmp_dir.name)
         _LOGGER.info("Extracting SAFE archive %s", safe_archive)
+<<<<<<< ours
         with zipfile.ZipFile(safe_archive) as archive:
             archive.extractall(tmp_path)
+=======
+        subprocess.run(["unzip", "-q", str(safe_archive), "-d", str(tmp_path)], check=True)
+>>>>>>> theirs
         safe_root = next(tmp_path.glob("*.SAFE"))
     else:
         safe_root = safe_archive
@@ -447,6 +538,7 @@ def compute_msi(nir: np.ndarray, swir: np.ndarray) -> np.ndarray:
     return _compute_index(swir, nir)
 
 
+<<<<<<< ours
 def compute_evi(nir: np.ndarray, red: np.ndarray, blue: np.ndarray) -> np.ndarray:
     """Compute the Enhanced Vegetation Index (EVI)."""
 
@@ -466,6 +558,8 @@ def compute_ndmi(nir: np.ndarray, swir: np.ndarray) -> np.ndarray:
     return _compute_index(nir - swir, nir + swir)
 
 
+=======
+>>>>>>> theirs
 def save_raster(array: np.ndarray, template_path: Path, destination: Path) -> Path:
     """Persist an index using the metadata from *template_path*."""
 
@@ -478,6 +572,7 @@ def save_raster(array: np.ndarray, template_path: Path, destination: Path) -> Pa
     return destination
 
 
+<<<<<<< ours
 @dataclass(frozen=True)
 class IndexSpec:
     """Metadata describing how to compute a spectral index."""
@@ -532,18 +627,48 @@ def analyse_scene(
         arrays = [band_arrays[band] for band in spec.bands]
         result = spec.func(*arrays)
         outputs[name] = save_raster(result, band_paths["nir"], output_dir / f"{name}.tif")
+=======
+def analyse_scene(band_paths: Dict[str, Path], output_dir: Path) -> Dict[str, Path]:
+    """Compute spectral indices for the scene and store them in *output_dir*."""
+
+    required = {"nir", "red", "swir1"}
+    missing = required - band_paths.keys()
+    if missing:
+        raise RuntimeError(f"Missing bands for analysis: {', '.join(sorted(missing))}")
+
+    nir, transform, crs = load_raster(band_paths["nir"])
+    red, _, _ = load_raster(band_paths["red"], reference_path=band_paths["nir"])
+    swir1, _, _ = load_raster(band_paths["swir1"], reference_path=band_paths["nir"])
+
+    ndvi = compute_ndvi(nir, red)
+    ndwi = compute_ndwi(nir, swir1)
+    msi = compute_msi(nir, swir1)
+
+    outputs = {
+        "ndvi": save_raster(ndvi, band_paths["nir"], output_dir / "ndvi.tif"),
+        "ndwi": save_raster(ndwi, band_paths["nir"], output_dir / "ndwi.tif"),
+        "msi": save_raster(msi, band_paths["nir"], output_dir / "msi.tif"),
+    }
+>>>>>>> theirs
     return outputs
 
 
 def _parse_arguments(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+<<<<<<< ours
     parser.add_argument("--geojson", type=Path, help="Path to AOI GeoJSON polygon (required when downloading)")
     parser.add_argument("--start-date", help="Start date YYYY-MM-DD (required when downloading)")
     parser.add_argument("--end-date", help="End date YYYY-MM-DD (required when downloading)")
+=======
+    parser.add_argument("--geojson", type=Path, required=True, help="Path to AOI GeoJSON polygon")
+    parser.add_argument("--start-date", required=True, help="Start date YYYY-MM-DD")
+    parser.add_argument("--end-date", required=True, help="End date YYYY-MM-DD")
+>>>>>>> theirs
     parser.add_argument("--cloud", type=int, nargs=2, default=(0, 20), help="Acceptable cloud cover percentage range")
     parser.add_argument("--download-dir", type=Path, default=Path("data/raw"), help="Directory to store downloaded products")
     parser.add_argument("--workdir", type=Path, default=Path("data/processed"), help="Directory for processed outputs")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+<<<<<<< ours
     parser.add_argument("--username", help="Copernicus Data Space username (overrides SENTINEL_USERNAME env var)")
     parser.add_argument("--password", help="Copernicus Data Space password (overrides SENTINEL_PASSWORD env var)")
     parser.add_argument("--api-url", help=f"OData API base URL (defaults to {DEFAULT_API_URL})")
@@ -560,6 +685,8 @@ def _parse_arguments(argv: Optional[Iterable[str]] = None) -> argparse.Namespace
         choices=sorted(INDEX_SPECS.keys()),
         help="Subset of spectral indices to compute (default: all available)",
     )
+=======
+>>>>>>> theirs
     return parser.parse_args(argv)
 
 
@@ -567,6 +694,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     args = _parse_arguments(argv)
     logging.basicConfig(level=args.log_level)
 
+<<<<<<< ours
     selected_indices = list(dict.fromkeys(args.indices or list(INDEX_SPECS.keys())))
     session: Optional[requests.Session] = None
 
@@ -619,6 +747,28 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     finally:
         if session is not None:
             session.close()
+=======
+    config = authenticate_from_env()
+    area = AreaOfInterest.from_geojson(args.geojson)
+
+    api = SentinelAPI(config.username, config.password, config.api_url)
+    product = query_latest_product(api, area, args.start_date, args.end_date, tuple(args.cloud))
+    if not product:
+        _LOGGER.error("No Sentinel-2 product found for the provided parameters.")
+        return
+
+    _LOGGER.info("Downloading product %s", product["title"])
+    product_path = download_product(api, product, args.download_dir)
+
+    _LOGGER.info("Extracting spectral bands")
+    bands = extract_bands_from_safe(product_path, args.workdir / product["title"])  # type: ignore[arg-type]
+
+    _LOGGER.info("Computing spectral indices")
+    outputs = analyse_scene(bands, args.workdir / product["title"] / "indices")
+
+    for name, path in outputs.items():
+        _LOGGER.info("Generated %s at %s", name.upper(), path)
+>>>>>>> theirs
 
 
 if __name__ == "__main__":
